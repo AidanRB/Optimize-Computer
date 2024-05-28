@@ -50,8 +50,11 @@ Deletes left over files, like CCTK. This should happen automatically and is only
 .PARAMETER Dell
 Specifies the targets must have Dell specific optimizations removed. Only has an effect with no optimization flags.
 
-.PARAMETER CCTK
+.PARAMETER CCTKPath
 Specifies the path to the folder containing CCTK. This can be a path on the local computer or a network share. An environment variable may be used instead.
+
+.PARAMETER CCTKPass
+The password to use with CCTK. This should be the BIOS password on the target (Dell) systems.
 
 .EXAMPLE
 .\Optimize-Computer.ps1 -Fans -CCTK C:\cctk\ remote-hostname
@@ -63,62 +66,53 @@ CCTK: https://www.dell.com/support/kbdoc/en-us/000134806/how-to-install-use-dell
 #>
 
 Param (
-    [Parameter()]
     [switch] $Fans,
 
-    [Parameter()]
     [switch] $FillStorage,
 
-    [Parameter()]
     [switch] $Cores,
 
-    [Parameter()]
     [switch] $Sleep,
 
-    [Parameter()]
     [switch] $USB,
 
-    [Parameter()]
     [switch] $Battery,
 
-    [Parameter()]
     [switch] $Sound,
 
-    [Parameter()]
     [switch] $Storage,
 
-    [Parameter()]
     [switch] $Camera,
 
-    [Parameter()]
     [switch] $Filter,
 
-    [Parameter()]
     [switch] $Cleanup,
 
-    [Parameter()]
-    [switch] $Dell = $Fans -or $Cores -or $Sleep -or $USB -or $Battery -or $Sound -or $Storage -or $Camera -or $Filter,
+    [string] $CCTKPath = $env:cctk,
 
-    [Parameter()]
-    [string] $CCTK = $env:cctk,
+    [string] $CCTKPass = $env:cctkpass,
 
-    [Parameter(HelpMessage = "Target hosts", Mandatory, ValueFromRemainingArguments)]
+    [Parameter(Mandatory, HelpMessage = "Target hosts", Position = 0, ValueFromRemainingArguments)]
     [string[]] $ComputerName
 )
-
-if ($Dell -and -not $CCTK) {
-    Write-Error -Message "Path to CCTK not found. See help." -ErrorAction Stop
-}
 
 # Cleanup in case extra sessions exist
 Remove-PSSession * -ErrorAction SilentlyContinue
 
 # Create sessions
-Write-Host Creating sessions...
+Write-Host -ForegroundColor Blue Creating sessions...
 $Sessions = New-PSSession $ComputerName
-Get-PSSession
 
-# Cleanup in case extra temp files exist
+# Show created sessions
+Write-Host -ForegroundColor Green -NoNewline Created sessions:
+(Get-PSSession).ForEach({ Write-Host -NoNewline " $($_.ComputerName)" })
+Write-Host
+
+# Create hashtable of computers
+$Computers = @{}
+$Sessions | ForEach-Object { $Computers.Add($_, $()) }
+
+# Cleanup in case old temp files exist
 Invoke-Command -Session $Sessions -ScriptBlock { Remove-Item -Recurse C:\Temp\cctk } -ErrorAction SilentlyContinue
 
 # Exit now if $Cleanup
@@ -127,22 +121,50 @@ if ($Cleanup) {
     Exit
 }
 
-# Copy files
-foreach ($Session in $Sessions) {
-    Write-Host Copying files to $Session.ComputerName...
-    Invoke-Command -Session $Session -ScriptBlock { New-Item -Path C:\Temp\cctk -ItemType Directory | Out-Null }
-    Copy-Item -ToSession $Session $(($env:cctk) + '\*') -Destination C:\Temp\cctk\
+# Detect Dell computers and copy CCTK if we know where it is
+if ($CCTKPath) {
+    # Check to see what targets are Dell
+    # Create "copy" of $Computers to allow modifying $Computers while iterating
+    foreach ($Computer in $($Computers.GetEnumerator())) {
+        # Run Get-CimInstance on the target computer to find and check the manufacturer
+        if (Invoke-Command -Session $Computer.Key -ScriptBlock { (Get-CimInstance win32_computersystem).Manufacturer -like "Dell*" }) {
+            # Add "Dell" to the original $Computers entry for this computer
+            $Computers[$Computer.Key] += "Dell"
+        }
+    }
+
+    # Show Dell computers
+    Write-Host -ForegroundColor Green -NoNewline Identified Dell computers:
+    ($Computers | Where-Object Values -Match "Dell").GetEnumerator().ForEach({ Write-Host -NoNewline " $($_.Key.ComputerName)" })
+    Write-Host
+
+    Write-Host -ForegroundColor Blue -NoNewline Copying CCTK:
+
+    # Copy CCTK in parallel to each Dell computer
+    ($Computers | Where-Object Values -Match "Dell").GetEnumerator() | ForEach-Object -Parallel {
+        Write-Host -NoNewline " $($_.Key.ComputerName)"
+        Invoke-Command -Session $_.Key -ScriptBlock { New-Item -Path C:\Temp\cctk -ItemType Directory -ErrorAction SilentlyContinue | Out-Null }
+        Copy-Item -ToSession $_.Key $(($env:cctk) + '\*') -Destination C:\Temp\cctk\
+    }
+    Write-Host
 }
 
 # Set fans
-Write-Host Setting fans...
+Write-Host -ForegroundColor Blue Setting fans...
 if ($Fans) {
-    Invoke-Command -Session $Sessions -ScriptBlock { C:\Temp\cctk\cctk.exe --FanCtrlOvrd=Enabled --ValSetupPwd=($env:cctkpwd) }
-} Else {
-    Invoke-Command -Session $Sessions -ScriptBlock { C:\Temp\cctk\cctk.exe --FanCtrlOvrd=Disabled --ValSetupPwd=($env:cctkpwd) }
+    Invoke-Command -Session $Sessions -ScriptBlock {
+        param($CCTKPass)
+        C:\Temp\cctk\cctk.exe --FanCtrlOvrd=Enabled --ValSetupPwd=$CCTKPass
+    } -ArgumentList $CCTKPass
+}
+Else {
+    Invoke-Command -Session $Sessions -ScriptBlock {
+        param($CCTKPass)
+        C:\Temp\cctk\cctk.exe --FanCtrlOvrd=Disabled --ValSetupPwd=$CCTKPass
+    } -ArgumentList $CCTKPass
 }
 
 # Cleanup
-Write-Host Cleaning up...
+Write-Host -ForegroundColor Blue Cleaning up...
 Invoke-Command -Session $Sessions -ScriptBlock { Remove-Item -Recurse C:\Temp\cctk }
 Remove-PSSession *
