@@ -96,6 +96,95 @@ Param (
     [string[]] $ComputerName
 )
 
+class ComputerProperties {
+    [string] $ComputerName
+    [System.Management.Automation.Runspaces.PSSession] $Session
+    [bool] $Dell
+    [string[]] $DellCapabilities
+    [string] $DellCommand
+
+    ComputerProperties([string] $ComputerName) {
+        $this.ComputerName = $ComputerName
+    }
+
+    ComputerProperties([string] $ComputerName, [System.Management.Automation.Runspaces.PSSession] $Session) {
+        $this.ComputerName = $ComputerName
+        $this.Session = $Session
+    }
+}
+
+class DellOption {
+    [string] $Enabling = $false
+    [scriptblock] $DellCheck
+    [string[]] $EnableCommand
+    [string[]] $DisableCommand
+}
+
+$DellOptions = @{
+    "Fans"    = [DellOption]@{
+        Enabling       = $Fans
+        DellCheck      = { $_ -match "FanCtrlOvrd" }
+        EnableCommand  = "FanCtrlOvrd=Enabled"
+        DisableCommand = "FanCtrlOvrd=Disabled"
+    }
+
+    "Cores"   = [DellOption]@{
+        Enabling       = $Cores
+        DellCheck      = { $_ -match "CpuCore" -or $_ -match "MultipleAtomCores" -or $_ -match "LogicProc" }
+        EnableCommand  = "CpuCore=1", "MultipleAtomCores=1", "LogicProc=Disabled"
+        DisableCommand = "CpuCore=CoresAll", "MultipleAtomCores=CoresAll", "LogicProc=Enabled"
+    }
+
+    "Sleep"   = [DellOption]@{
+        Enabling       = $Sleep
+        DellCheck      = { $_ -match "BlockSleep" }
+        EnableCommand  = "BlockSleep=Enabled"
+        DisableCommand = "BlockSleep=Disabled"
+    }
+
+    "USB"     = [DellOption]@{
+        Enabling       = $USB
+        DellCheck      = { $_ -match "^UsbPorts" -or $_ -match "^ThunderboltPorts" }
+        EnableCommand  = "UsbPortsFront=Disabled", "UsbPortsRear=Disabled", "UsbPortsExternal=Disabled", "ThunderboltPorts=Disabled"
+        DisableCommand = "UsbPortsFront=Enabled", "UsbPortsRear=Enabled", "UsbPortsExternal=Enabled", "ThunderboltPorts=Enabled"
+    }
+
+    "Battery" = [DellOption]@{
+        Enabling       = $Battery
+        DellCheck      = { $_ -match "PrimaryBattChargeCfg" }
+        EnableCommand  = "PrimaryBattChargeCfg=Custom:5-55"
+        DisableCommand = "PrimaryBattChargeCfg=Adaptive"
+    }
+
+    "Sound"   = [DellOption]@{
+        Enabling       = $Sound
+        DellCheck      = { $_ -match "IntegratedAudio" -or $_ -match "InternalSpeaker" }
+        EnableCommand  = "IntegratedAudio=Disabled", "InternalSpeaker=Disabled"
+        DisableCommand = "IntegratedAudio=Enabled", "InternalSpeaker=Enabled"
+    }
+
+    "Storage" = [DellOption]@{
+        Enabling       = $Storage
+        DellCheck      = { $_ -match "^M2PcieSsd" -or $_ -match "^Sata" }
+        EnableCommand  = "M2PcieSsd0=Disabled", "M2PcieSsd1=Disabled", "Sata0=Disabled", "Sata1=Disabled", "Sata2=Disabled", "Sata3=Disabled"
+        DisableCommand = "M2PcieSsd0=Enabled", "M2PcieSsd1=Enabled", "Sata0=Enabled", "Sata1=Enabled", "Sata2=Enabled", "Sata3=Enabled"
+    }
+
+    "Camera"  = [DellOption]@{
+        Enabling       = $Camera
+        DellCheck      = { $_ -match "Camera" -or $_ -match "Microphone" }
+        EnableCommand  = "Camera=Disabled", "Microphone=Disabled"
+        DisableCommand = "Camera=Enabled", "Microphone=Enabled"
+    }
+
+    "Filter"  = [DellOption]@{
+        Enabling       = $Filter
+        DellCheck      = { $_ -match "DustFilter" }
+        EnableCommand  = "DustFilter=15days"
+        DisableCommand = "DustFilter=Disabled"
+    }
+}
+
 # Cleanup in case extra sessions exist
 Remove-PSSession * -ErrorAction SilentlyContinue
 
@@ -110,7 +199,7 @@ Write-Host
 
 # Create hashtable of computers
 $Computers = @{}
-$Sessions | ForEach-Object { $Computers.Add($_, $()) }
+$Sessions | ForEach-Object { $Computers.Add($_.ComputerName, (New-Object -TypeName ComputerProperties -ArgumentList $_.ComputerName, $_)) }
 
 # Cleanup in case old temp files exist
 Invoke-Command -Session $Sessions -ScriptBlock { Remove-Item -Recurse C:\Temp\cctk } -ErrorAction SilentlyContinue
@@ -124,44 +213,58 @@ if ($Cleanup) {
 # Detect Dell computers and copy CCTK if we know where it is
 if ($CCTKPath) {
     # Check to see what targets are Dell
-    # Create "copy" of $Computers to allow modifying $Computers while iterating
-    foreach ($Computer in $($Computers.GetEnumerator())) {
-        # Run Get-CimInstance on the target computer to find and check the manufacturer
-        if (Invoke-Command -Session $Computer.Key -ScriptBlock { (Get-CimInstance win32_computersystem).Manufacturer -like "Dell*" }) {
-            # Add "Dell" to the original $Computers entry for this computer
-            $Computers[$Computer.Key] += "Dell"
+    foreach ($Session in $Sessions) {
+        if (Invoke-Command -Session $Session -ScriptBlock { (Get-CimInstance win32_computersystem).Manufacturer -like "Dell*" }) {
+            $Computers[$Session.ComputerName].Dell = $true
         }
     }
 
     # Show Dell computers
     Write-Host -ForegroundColor Green -NoNewline Identified Dell computers:
-    ($Computers | Where-Object Values -Match "Dell").GetEnumerator().ForEach({ Write-Host -NoNewline " $($_.Key.ComputerName)" })
+    ($Computers | Where-Object { $_.Values.Dell }).GetEnumerator().ForEach({ Write-Host -NoNewline " $($_.Key)" })
     Write-Host
 
     Write-Host -ForegroundColor Blue -NoNewline Copying CCTK:
 
     # Copy CCTK in parallel to each Dell computer
-    ($Computers | Where-Object Values -Match "Dell").GetEnumerator() | ForEach-Object -Parallel {
-        Write-Host -NoNewline " $($_.Key.ComputerName)"
-        Invoke-Command -Session $_.Key -ScriptBlock { New-Item -Path C:\Temp\cctk -ItemType Directory -ErrorAction SilentlyContinue | Out-Null }
-        Copy-Item -ToSession $_.Key $(($env:cctk) + '\*') -Destination C:\Temp\cctk\
+    ($Computers | Where-Object { $_.Values.Dell }).GetEnumerator() | ForEach-Object -Parallel {
+        Write-Host -NoNewline " $($_.Key)"
+        Invoke-Command -Session $_.Value.Session -ScriptBlock {
+            New-Item -Path C:\Temp\cctk -ItemType Directory -ErrorAction SilentlyContinue | Out-Null
+        }
+        Copy-Item -ToSession $_.Value.Session $(($env:cctk) + '\*') -Destination C:\Temp\cctk\
+    }
+    Write-Host
+
+    # Get available BIOS settings
+    Write-Host -ForegroundColor Blue -NoNewline Detecting capabilities...
+    ($Computers | Where-Object { $_.Values.Dell }).GetEnumerator() | ForEach-Object -Parallel {
+        $_.Value.DellCapabilities = (Invoke-Command -Session $_.Value.Session -ScriptBlock {
+                c:\Temp\cctk\cctk.exe
+            }).Split().Where({ $_ -match '--' }).Split('--').Where({ $_ -notmatch '\*' -and $_ -ne '' -and $_ -notmatch 'option\[=argument\]' }) | Sort-Object
+        Write-Host -ForegroundColor Green -NoNewline " $($_.Key)"
     }
     Write-Host
 }
 
-# Set fans
-Write-Host -ForegroundColor Blue Setting fans...
-if ($Fans) {
-    Invoke-Command -Session $Sessions -ScriptBlock {
-        param($CCTKPass)
-        C:\Temp\cctk\cctk.exe --FanCtrlOvrd=Enabled --ValSetupPwd=$CCTKPass
-    } -ArgumentList $CCTKPass
-}
-Else {
-    Invoke-Command -Session $Sessions -ScriptBlock {
-        param($CCTKPass)
-        C:\Temp\cctk\cctk.exe --FanCtrlOvrd=Disabled --ValSetupPwd=$CCTKPass
-    } -ArgumentList $CCTKPass
+foreach ($Computer in $Computers.GetEnumerator()) {
+    $Computer.Value.DellCommand = ""
+    foreach ($Option in $DellOptions.GetEnumerator()) {
+        if ($Option.Value.Enabling -eq $true -and ($Computer.Value.DellCapabilities | Where-Object -FilterScript $Option.Value.DellCheck)) {
+            foreach ($Command in $Option.Value.EnableCommand) {
+                if ($Command.Split('=')[0] -in $Computer.Value.DellCapabilities) {
+                    $Computer.Value.DellCommand += "--$Command "
+                }
+            }
+        }
+    }
+    Write-Host -ForegroundColor Green -NoNewline "Configuring $($Computer.Key): "
+    Write-Host $($Computer.Value.DellCommand)
+
+    # Invoke-Command -Session $Computer.Value.Session -ScriptBlock {
+    #     param($CCTKPass, $DellCommand)
+    #     C:\Temp\cctk\cctk.exe $DellCommand --ValSetupPwd=$CCTKPass
+    # } -ArgumentList $CCTKPass, $Computer.Value.DellCommand
 }
 
 # Cleanup
