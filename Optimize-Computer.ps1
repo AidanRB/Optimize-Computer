@@ -107,8 +107,8 @@ class ComputerProperties {
         $this.ComputerName = $ComputerName
     }
 
-    ComputerProperties([string] $ComputerName, [System.Management.Automation.Runspaces.PSSession] $Session) {
-        $this.ComputerName = $ComputerName
+    ComputerProperties([System.Management.Automation.Runspaces.PSSession] $Session) {
+        $this.ComputerName = $Session.ComputerName
         $this.Session = $Session
     }
 }
@@ -196,7 +196,9 @@ Write-Host
 
 # Create hashtable of computers
 $Computers = @{}
-$Sessions | ForEach-Object { $Computers.Add($_.ComputerName, (New-Object -TypeName ComputerProperties -ArgumentList $_.ComputerName, $_)) }
+$Sessions | ForEach-Object {
+    $Computers.Add($_.ComputerName, [ComputerProperties]::new([System.Management.Automation.Runspaces.PSSession]$_))
+}
 
 # Cleanup in case old temp files exist
 Invoke-Command -Session $Sessions -ScriptBlock { Remove-Item -Recurse C:\Temp\cctk } -ErrorAction SilentlyContinue
