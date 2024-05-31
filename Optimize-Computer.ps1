@@ -185,16 +185,13 @@ $DellOptions = @{
     }
 }
 
-# Cleanup in case extra sessions exist
-Remove-PSSession * -ErrorAction SilentlyContinue
-
 # Create sessions
 Write-Host -ForegroundColor Blue Creating sessions...
 $Sessions = New-PSSession $ComputerName
 
 # Show created sessions
 Write-Host -ForegroundColor Green -NoNewline Created sessions:
-(Get-PSSession).ForEach({ Write-Host -NoNewline " $($_.ComputerName)" })
+$Sessions.ForEach({ Write-Host -NoNewline " $($_.ComputerName)" })
 Write-Host
 
 # Create hashtable of computers
@@ -206,6 +203,7 @@ Invoke-Command -Session $Sessions -ScriptBlock { Remove-Item -Recurse C:\Temp\cc
 
 # Exit now if $Cleanup
 if ($Cleanup) {
+    # Remove all sessions if cleanup is requested
     Remove-PSSession *
     Exit
 }
@@ -270,4 +268,4 @@ foreach ($Computer in $Computers.GetEnumerator()) {
 # Cleanup
 Write-Host -ForegroundColor Blue Cleaning up...
 Invoke-Command -Session $Sessions -ScriptBlock { Remove-Item -Recurse C:\Temp\cctk }
-Remove-PSSession *
+$Sessions | Remove-PSSession
